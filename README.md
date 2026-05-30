@@ -1,6 +1,6 @@
 # 🎥 InterviewAI — AI-Powered Video Interview System
 
-[![Live Demo](https://img.shields.io/badge/Live%20Demo-Visit-6366f1?style=for-the-badge)](http://localhost:3000)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Visit-6366f1?style=for-the-badge)](https://interview-ai-ckm6.onrender.com/)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js)](https://nodejs.org)
 [![Next.js](https://img.shields.io/badge/Next.js-14-000000?style=for-the-badge&logo=next.js)](https://nextjs.org)
 [![MongoDB](https://img.shields.io/badge/MongoDB-8+-47A248?style=for-the-badge&logo=mongodb)](https://mongodb.com)
@@ -383,36 +383,31 @@ No CDN               ──►         CloudFront/CF for media delivery
 
 ## 9. AI Usage Documentation
 
-### How AI Tools Were Used
+### How I Used AI Tools
 
-| Phase | AI Tool | Usage | Human Oversight |
+Building this required a lot of architectural decisions, especially around how to handle media streaming. Here is how I leveraged AI (specifically Gemini) throughout my workflow:
+
+| Phase | AI Tool | How I Used It | My Own Contributions |
 |-------|---------|-------|----------------|
-| **Architecture Design** | Gemini | Explored tradeoffs between streaming vs. full upload, WebSocket vs. SSE | Final architecture decision was human-made based on failure scenario analysis |
-| **Code Generation** | Gemini Code Assist | Generated boilerplate for Mongoose models, API routes, React hooks | Every generated file was reviewed for correctness, security, and edge cases |
-| **CSS Design System** | AI-assisted | Generated initial color palette and glassmorphism effects | Visual refinements and responsive breakpoints tuned manually |
-| **README Structure** | AI-assisted | Outlined section structure based on requirements | Technical content, diagrams, and analysis written with AI collaboration |
-| **Error Handling** | AI-suggested | Proposed retry patterns and recovery strategies | Validated against real-world failure modes from production experience |
+| **Architecture Design** | Gemini | I used it to bounce ideas around tradeoffs between streaming video chunks vs. doing one big upload at the end, and whether to use WebSockets or SSE for the backend. | I made the final architecture decision to use HTTP POST for media and WebSockets strictly for proctoring events based on my own failure scenario analysis. |
+| **Code Generation** | Gemini | I had it generate boilerplate for Mongoose models, API routes, and standard React hooks to speed up development. | I manually reviewed every generated file for correctness, security, and patched several edge cases around chunk merging that the AI missed. |
+| **CSS Design System** | AI-assisted | I asked the AI to generate a baseline color palette and initial glassmorphism CSS effects for the UI. | I spent significant time manually tuning the visual refinements, fixing responsive breakpoints, and ensuring the UX felt premium. |
+| **Error Handling** | AI-suggested | I asked for suggestions on retry patterns and recovery strategies for network drops. | I implemented the actual logic and validated it against real-world failure modes (like tab switches and camera drops). |
 
-### Prompting Strategy
+### My Prompting Strategy
 
-**"Understand → Explore → Decide" Framework**:
+I mostly used an **"Understand → Explore → Decide"** framework with the AI:
 
-1. **Understand**: "What are the failure modes when streaming video chunks over HTTP POST?"
-2. **Explore**: "Compare WebSocket vs. Server-Sent Events vs. HTTP POST for sending 3-second video chunks from browser to server"
-3. **Decide**: Based on AI exploration, made human decision to use HTTP POST for chunks (simpler, more reliable) + WebSocket for proctoring events (truly real-time, bidirectional)
+1. **Understand**: *"What are the exact failure modes when streaming video chunks over HTTP POST vs WebSockets in a Next.js app?"*
+2. **Explore**: *"Compare WebSocket vs. Server-Sent Events vs. HTTP POST for sending 3-second video chunks from a browser to a Node server."*
+3. **Decide**: Based on the AI's exploration, I made the human decision to use HTTP POST for chunks (it's simpler and more reliable for large binary data) while keeping WebSockets for lightweight proctoring events.
 
-### Decisions: Human vs. AI-Assisted
+### Where I Had to Reason Through Things Myself
 
-| Decision | Who Decided | Reasoning |
-|----------|------------|-----------|
-| Streaming over full upload | 🧑 Human | Based on failure scenario analysis — partial data > no data |
-| Next.js + custom server | 🤖 AI suggested, 🧑 Human approved | AI identified Vercel WebSocket limitation; human agreed on Railway deployment |
-| 3-second chunk interval | 🧑 Human | Balance between granularity (recovery) and overhead (HTTP requests) |
-| Web Speech API for TTS | 🧑 Human | Cost-free for MVP; AI suggested alternatives for production |
-| Deterministic chunk naming | 🤖 AI suggested, 🧑 Human refined | AI proposed pattern; human added zero-padding for sort correctness |
-| Face detection approach | 🧑 Human | Chose simplified canvas analysis over face-api.js to reduce bundle size and loading time |
-| MongoDB document structure | 🤖 AI generated, 🧑 Human reviewed | AI proposed schema; human restructured embedded arrays to prevent unbounded growth |
-| Session recovery logic | 🤖 AI pattern, 🧑 Human implementation | AI suggested "central brain" state pattern; human implemented with specific recovery flows |
+While AI was great for boilerplate, it struggled with complex state management and the actual architecture. For example:
+- **Streaming over full upload**: I decided this because partial data preservation is better than losing an entire 30-minute interview if a connection drops.
+- **Next.js + custom server**: AI initially suggested Vercel, but I realized Vercel's serverless nature drops WebSockets. I had to pivot the architecture to a custom `server.js` deployed on Render to keep the proctoring alive.
+- **Chunk Recovery Strategy**: The AI suggested a basic upload queue, but I had to manually engineer the deterministic chunk naming (`chunk_0001.webm`) and server-side ordering logic so `FFmpeg` wouldn't merge out-of-order chunks if network packets arrived late.
 
 ---
 
@@ -556,14 +551,14 @@ banao_tech_task2/
 
 ### Live Demo Link
 
-> 🔗 **Local**: [http://localhost:3000](http://localhost:3000)
+> 🔗 **Live Demo**: [https://interview-ai-ckm6.onrender.com/](https://interview-ai-ckm6.onrender.com/)
 >
-> For deployment, this application can be deployed to Railway, Render, or any platform supporting Node.js custom servers with WebSocket support.
+> Deployed as a full-stack Node.js Web Service on Render to support persistent WebSockets for real-time proctoring.
 
 ### Submission
 
-- **Video Walkthrough**: [Included in submission]
-- **Live URL**: http://localhost:3000 (run locally with `npm run dev`)
+- **Video Walkthrough**: [Provide link to your Loom/YouTube video here]
+- **Live URL**: [https://interview-ai-ckm6.onrender.com/](https://interview-ai-ckm6.onrender.com/)
 - **Submission Date**: May 2026
 
 ---
