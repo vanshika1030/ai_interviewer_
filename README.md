@@ -580,4 +580,547 @@ banao_tech_task2/
 
 ---
 
-*Built with ❤️ for Banao Tech Assessment*
+# 🏗️ InterviewAI — System Architecture & Flow Diagrams
+
+---
+
+## 1. High-Level System Architecture
+
+```mermaid
+graph TD
+    subgraph BROWSER["🖥️ Browser (Client)"]
+        UI["React 18 / Next.js 14<br/>App Router (SSR + CSR)"]
+        MR["MediaRecorder API<br/>3-sec WebM Chunks"]
+        TTS["Web Speech API<br/>SpeechSynthesis (TTS)"]
+        PROC_C["Proctoring Engine<br/>• visibilitychange API<br/>• Canvas Pixel Analysis"]
+        HOOKS["Custom React Hooks<br/>• useMediaRecorder<br/>• useProctoring<br/>• useSocket<br/>• useInterview"]
+    end
+
+    subgraph SERVER["⚙️ Node.js Custom Server"]
+        NEXT["Next.js SSR Engine<br/>+ API Route Handler"]
+        SIO["Socket.IO Server<br/>(WebSocket)"]
+        MEDIA_PROC["Media Processor<br/>• Chunk Merge (FFmpeg)<br/>• Gap Detection<br/>• Dedup"]
+        AUTH_MOD["Auth Module<br/>JWT + bcryptjs"]
+
+        subgraph API_ROUTES["REST API Routes (/api/*)"]
+            AUTH_API["/api/auth/*<br/>Register · Login"]
+            INT_API["/api/interviews/*<br/>CRUD · List"]
+            SESS_API["/api/sessions/*<br/>Create · State · Chunks"]
+            TRANS_API["/api/transcribe<br/>Trigger STT"]
+            MEDIA_API["/api/media/*<br/>Serve Recordings"]
+        end
+    end
+
+    subgraph DATA["💾 Data Layer"]
+        MONGO[("MongoDB<br/>• Users<br/>• Interviews<br/>• Sessions")]
+        FS["Local Filesystem<br/>uploads/{sessionId}/<br/>q{N}/chunk_NNN.webm"]
+    end
+
+    subgraph EXTERNAL["☁️ External APIs"]
+        DEEPGRAM["Deepgram API<br/>Speech-to-Text"]
+        GEMINI["Google Gemini API<br/>AI Evaluation"]
+    end
+
+    UI --> MR
+    UI --> TTS
+    UI --> PROC_C
+    UI --> HOOKS
+    MR -- "POST /api/sessions/[id]/chunks<br/>(HTTP, binary)" --> SESS_API
+    PROC_C -- "Socket.IO events<br/>(WebSocket)" --> SIO
+    HOOKS -- "REST calls" --> API_ROUTES
+
+    AUTH_API --> AUTH_MOD
+    AUTH_MOD --> MONGO
+    INT_API --> MONGO
+    SESS_API --> FS
+    SESS_API --> MONGO
+    MEDIA_PROC --> FS
+    TRANS_API --> DEEPGRAM
+    DEEPGRAM -- "Transcript JSON" --> TRANS_API
+    TRANS_API --> GEMINI
+    GEMINI -- "Evaluation Scores" --> TRANS_API
+    TRANS_API --> MONGO
+    MEDIA_API --> FS
+
+    SIO -- "proctoring-alert<br/>state-update" --> UI
+
+    style BROWSER fill:#1e1b4b,stroke:#6366f1,color:#e0e7ff,stroke-width:2px
+    style SERVER fill:#0f172a,stroke:#38bdf8,color:#e0f2fe,stroke-width:2px
+    style DATA fill:#1a2e05,stroke:#84cc16,color:#ecfccb,stroke-width:2px
+    style EXTERNAL fill:#3b0764,stroke:#c084fc,color:#f3e8ff,stroke-width:2px
+```
+
+---
+
+## 2. Media Streaming Pipeline (Chunk Flow)
+
+```mermaid
+flowchart LR
+    subgraph CAPTURE["📹 Capture"]
+        CAM["Camera +<br/>Microphone"]
+        MR2["MediaRecorder<br/>video/webm; codecs=vp8,opus"]
+        BUF["Blob Buffer<br/>(ondataavailable<br/>every 3 sec)"]
+    end
+
+    subgraph UPLOAD["📤 Streaming Upload"]
+        FD["FormData<br/>• file: chunk blob<br/>• chunkIndex: N<br/>• questionIndex: Q"]
+        POST["HTTP POST<br/>/api/sessions/[id]/chunks"]
+        RETRY["Retry Queue<br/>Exponential Backoff<br/>1s → 2s → 4s → 8s<br/>max 3 retries"]
+    end
+
+    subgraph STORAGE["💾 Server Storage"]
+        DIR["uploads/{sessionId}/<br/>q{questionIndex}/"]
+        DEDUP["Idempotency Check<br/>chunk_NNNN.webm exists?"]
+        SAVE["Save chunk_NNNN.webm"]
+    end
+
+    subgraph MERGE["🔧 Merge & Process"]
+        GAP["Gap Detection<br/>Scan sequence 0001..N"]
+        SORT["Sort by Index<br/>(handle out-of-order)"]
+        CONCAT["FFmpeg Concat<br/>→ merged_response.webm"]
+    end
+
+    subgraph ANALYZE["🧠 AI Analysis"]
+        DG["Deepgram STT<br/>nova-2 model"]
+        TRANSCRIPT["Raw Transcript<br/>+ Word Timestamps"]
+        GEM["Google Gemini<br/>Prompt: Evaluate on<br/>• Communication (0-100)<br/>• Relevance (0-100)<br/>• Depth (0-100)<br/>• Confidence (0-100)"]
+        SCORE["Overall Score<br/>0-100 + Feedback"]
+    end
+
+    CAM --> MR2 --> BUF --> FD --> POST
+    POST -- "❌ Fail" --> RETRY --> POST
+    POST -- "✅ 200 OK" --> DEDUP
+    DEDUP -- "New" --> SAVE
+    DEDUP -- "Duplicate" --> SKIP["Skip (idempotent)"]
+    SAVE --> DIR
+    DIR -- "Question ends" --> GAP --> SORT --> CONCAT
+    CONCAT --> DG --> TRANSCRIPT --> GEM --> SCORE
+    SCORE -- "Write to MongoDB" --> DB_WRITE[("Session.responses[]<br/>{ transcript, evaluation,<br/>  overallScore }")]
+
+    style CAPTURE fill:#1e1b4b,stroke:#818cf8,color:#e0e7ff
+    style UPLOAD fill:#0c4a6e,stroke:#38bdf8,color:#e0f2fe
+    style STORAGE fill:#1a2e05,stroke:#84cc16,color:#ecfccb
+    style MERGE fill:#713f12,stroke:#facc15,color:#fef9c3
+    style ANALYZE fill:#3b0764,stroke:#c084fc,color:#f3e8ff
+```
+
+---
+
+## 3. WebSocket / Real-Time Event Architecture
+
+```mermaid
+sequenceDiagram
+    participant C as 🧑 Candidate Browser
+    participant S as ⚙️ Socket.IO Server
+    participant R as 👔 Recruiter Dashboard
+    participant DB as 💾 MongoDB
+
+    Note over C,R: Connection Phase
+    C->>S: connect()
+    S-->>C: connected (socketId)
+    C->>S: join-session { sessionId, role: "candidate" }
+    S->>DB: Update session.socketId
+    R->>S: join-session { sessionId, role: "recruiter" }
+
+    Note over C,R: Interview In Progress
+    rect rgb(30, 27, 75)
+        loop Every 10 seconds
+            C->>S: heartbeat { sessionId, timestamp }
+            S-->>C: heartbeat-ack { serverTime }
+            S->>DB: Update lastHeartbeat
+        end
+    end
+
+    rect rgb(127, 29, 29)
+        Note over C,S: Proctoring Events
+        C->>S: proctoring-event { type: "tab-switch", timestamp }
+        S->>DB: Push to session.proctoringEvents[]
+        S->>R: proctoring-alert { type: "tab-switch", count: 3 }
+
+        C->>S: proctoring-event { type: "no-face", timestamp }
+        S->>DB: Push to session.proctoringEvents[]
+        S->>R: proctoring-alert { type: "no-face", duration: "5s" }
+    end
+
+    rect rgb(6, 78, 59)
+        Note over C,S: State Transitions
+        C->>S: interview-state { action: "question-changed", qIndex: 2 }
+        S->>DB: Update currentQuestionIndex
+        S->>R: state-update { currentQuestion: 2, status: "recording" }
+
+        C->>S: interview-state { action: "recording-started" }
+        S->>R: state-update { status: "recording" }
+
+        C->>S: interview-state { action: "recording-stopped" }
+        S->>R: state-update { status: "processing" }
+    end
+
+    Note over C,R: Disconnect & Recovery
+    C--xS: disconnect (network drop)
+    S->>DB: Mark session.status = "disconnected"
+    S->>R: state-update { status: "disconnected" }
+
+    Note over C: Auto-reconnect (exp. backoff 1s→2s→4s→8s, max 30s)
+    C->>S: connect() [reconnect attempt]
+    C->>S: join-session { sessionId, role: "candidate" }
+    S->>DB: Fetch session state
+    S-->>C: session-state { currentQuestionIndex: 2, chunksReceived: 15 }
+    C->>C: Resume from question 2
+```
+
+---
+
+## 4. Database Schema (Entity-Relationship)
+
+```mermaid
+erDiagram
+    USER {
+        ObjectId _id PK
+        String name
+        String email UK
+        String passwordHash
+        String role "recruiter"
+        Date createdAt
+    }
+
+    INTERVIEW {
+        ObjectId _id PK
+        ObjectId recruiterId FK
+        String title
+        String description
+        Array questions "[ {text, timeLimit, order} ]"
+        String status "active | archived"
+        String shareCode UK
+        Date createdAt
+    }
+
+    SESSION {
+        ObjectId _id PK
+        ObjectId interviewId FK
+        String candidateName
+        String candidateEmail
+        String status "pending | in_progress | completed | evaluated"
+        Number currentQuestionIndex
+        Number chunksReceived
+        Number resumeCount
+        Date startedAt
+        Date completedAt
+        Date lastHeartbeat
+        String socketId
+    }
+
+    RESPONSE {
+        Number questionIndex
+        String chunkDirectory "uploads/sessionId/qN/"
+        Number chunkCount
+        String mergedFilePath
+        String transcript
+        Object evaluation "{ overall, communication, relevance, depth, confidence, feedback }"
+    }
+
+    PROCTORING_EVENT {
+        String type "tab-switch | no-face"
+        Date timestamp
+        Number duration
+    }
+
+    USER ||--o{ INTERVIEW : "creates"
+    INTERVIEW ||--o{ SESSION : "has"
+    SESSION ||--|{ RESPONSE : "contains (embedded)"
+    SESSION ||--o{ PROCTORING_EVENT : "records (embedded)"
+```
+
+---
+
+## 5. Application Layer Architecture (Next.js)
+
+```mermaid
+graph TD
+    subgraph CLIENT_PAGES["📄 Pages (App Router)"]
+        LANDING["/ <br/>Landing Page"]
+        CAND_ENTRY["/candidate<br/>Enter Interview Code"]
+        HW_CHECK["/candidate/hardware-check<br/>Camera · Mic · Speaker Test"]
+        INTERVIEW_ROOM["/candidate/interview/[sessionId]<br/>Live Interview Room"]
+        REC_DASH["/recruiter<br/>Dashboard (All Interviews)"]
+        REC_CREATE["/recruiter/create<br/>Create Interview Template"]
+        REC_REVIEW["/recruiter/interviews/[id]<br/>Review Sessions + Scores"]
+    end
+
+    subgraph HOOKS_LAYER["🪝 Custom Hooks Layer"]
+        H_MR["useMediaRecorder<br/>• startRecording()<br/>• stopRecording()<br/>• onDataAvailable → upload"]
+        H_PROC["useProctoring<br/>• detectTabSwitch()<br/>• detectFaceAbsence()<br/>• emitEvent()"]
+        H_SOCK["useSocket<br/>• connect/reconnect<br/>• heartbeat loop<br/>• event handlers"]
+        H_INT["useInterview<br/>• questionFlow orchestration<br/>• timer management<br/>• TTS queueing"]
+    end
+
+    subgraph COMPONENTS["🧩 Component Library"]
+        UI_BTN["ui/Button, Card, Badge"]
+        UI_TIMER["interview/Timer<br/>(circular countdown)"]
+        UI_VIDEO["interview/VideoPreview"]
+        UI_PROCT["interview/ProctoringOverlay"]
+        UI_PROG["interview/ProgressBar<br/>Question 2 of 5"]
+    end
+
+    subgraph SERVER_LIB["📚 Server Libraries (src/lib/)"]
+        LIB_DB["db.js<br/>Mongoose connection singleton"]
+        LIB_AUTH["auth.js<br/>JWT sign/verify helpers"]
+        LIB_STORE["storage.js<br/>File read/write/merge"]
+        LIB_DG["deepgram.js<br/>STT client wrapper"]
+        LIB_EVAL["evaluator.js<br/>Gemini prompt builder"]
+    end
+
+    subgraph MODELS["📦 Mongoose Models"]
+        M_USER["User.js"]
+        M_INT["Interview.js"]
+        M_SESS["Session.js"]
+    end
+
+    LANDING --> CAND_ENTRY
+    LANDING --> REC_DASH
+    CAND_ENTRY --> HW_CHECK --> INTERVIEW_ROOM
+    REC_DASH --> REC_CREATE
+    REC_DASH --> REC_REVIEW
+
+    INTERVIEW_ROOM --> H_MR
+    INTERVIEW_ROOM --> H_PROC
+    INTERVIEW_ROOM --> H_SOCK
+    INTERVIEW_ROOM --> H_INT
+    INTERVIEW_ROOM --> UI_TIMER
+    INTERVIEW_ROOM --> UI_VIDEO
+    INTERVIEW_ROOM --> UI_PROCT
+    INTERVIEW_ROOM --> UI_PROG
+
+    H_MR --> LIB_STORE
+    H_SOCK --> LIB_DB
+    LIB_AUTH --> M_USER
+    LIB_DG --> LIB_EVAL
+    LIB_STORE --> M_SESS
+    LIB_DB --> M_INT
+
+    style CLIENT_PAGES fill:#1e1b4b,stroke:#818cf8,color:#e0e7ff
+    style HOOKS_LAYER fill:#0c4a6e,stroke:#38bdf8,color:#e0f2fe
+    style COMPONENTS fill:#713f12,stroke:#facc15,color:#fef9c3
+    style SERVER_LIB fill:#1a2e05,stroke:#84cc16,color:#ecfccb
+    style MODELS fill:#3b0764,stroke:#c084fc,color:#f3e8ff
+```
+
+---
+
+## 6. Candidate Interview Flow (State Machine)
+
+```mermaid
+stateDiagram-v2
+    [*] --> EnterCode: Visit /candidate
+
+    EnterCode --> HardwareCheck: Submit interview code + details
+    HardwareCheck --> CameraTest: Begin hardware verification
+    CameraTest --> MicTest: ✅ Camera OK
+    CameraTest --> CameraTest: ❌ Retry camera
+    MicTest --> SpeakerTest: ✅ Mic OK
+    MicTest --> MicTest: ❌ Retry mic
+    SpeakerTest --> ReadyScreen: ✅ All hardware OK
+    SpeakerTest --> SpeakerTest: ❌ Retry speakers
+
+    ReadyScreen --> GetReady: Start Interview
+    GetReady --> QuestionActive: 5-sec countdown ends
+
+    state QuestionActive {
+        [*] --> TTSSpeaking: AI reads question aloud
+        TTSSpeaking --> Recording: TTS finishes
+        Recording --> TimerRunning: Start countdown
+        TimerRunning --> TimerExpired: Time runs out
+        TimerRunning --> ManualStop: Candidate clicks Stop
+    }
+
+    QuestionActive --> NextQuestion: Has more questions
+    QuestionActive --> InterviewComplete: Last question done
+
+    NextQuestion --> QuestionActive: Load next question
+
+    state InterviewComplete {
+        [*] --> ChunkMerge: Merge all chunks per question
+        ChunkMerge --> Transcription: Send to Deepgram
+        Transcription --> AIEvaluation: Send to Gemini
+        AIEvaluation --> ResultsSaved: Write scores to DB
+    }
+
+    InterviewComplete --> ThankYou: Show completion screen
+    ThankYou --> [*]
+
+    note right of QuestionActive
+        Proctoring runs in parallel:
+        • Tab switch detection
+        • Face absence detection
+        • Heartbeat every 10s
+    end note
+```
+
+---
+
+## 7. Authentication & Authorization Flow
+
+```mermaid
+sequenceDiagram
+    participant U as User (Browser)
+    participant API as /api/auth/*
+    participant JWT as JWT Module
+    participant DB as MongoDB (Users)
+    participant BC as bcryptjs
+
+    Note over U,DB: Registration Flow
+    U->>API: POST /api/auth/register { name, email, password }
+    API->>DB: Check email uniqueness
+    DB-->>API: Not found (OK)
+    API->>BC: bcrypt.hash(password, 10)
+    BC-->>API: passwordHash
+    API->>DB: Insert { name, email, passwordHash, role }
+    DB-->>API: Created
+    API->>JWT: jwt.sign({ userId, role }, secret)
+    JWT-->>API: token
+    API-->>U: 201 { token, user }
+
+    Note over U,DB: Login Flow
+    U->>API: POST /api/auth/login { email, password }
+    API->>DB: Find user by email
+    DB-->>API: { user }
+    API->>BC: bcrypt.compare(password, user.passwordHash)
+    BC-->>API: true ✅
+    API->>JWT: jwt.sign({ userId, role }, secret)
+    JWT-->>API: token
+    API-->>U: 200 { token, user }
+
+    Note over U,DB: Protected Route Access
+    U->>API: GET /api/interviews (Authorization: Bearer <token>)
+    API->>JWT: jwt.verify(token, secret)
+    JWT-->>API: { userId, role }
+    API->>DB: Query interviews where recruiterId = userId
+    DB-->>API: [interviews]
+    API-->>U: 200 [interviews]
+```
+
+---
+
+## 8. Failure Recovery & Resilience Architecture
+
+```mermaid
+flowchart TD
+    subgraph FAILURES["⚠️ Failure Detection"]
+        F1["Network Drop<br/>(chunk upload fails)"]
+        F2["WebSocket Disconnect<br/>(heartbeat timeout > 30s)"]
+        F3["Browser Crash<br/>(tab close / crash)"]
+        F4["Camera/Mic Loss<br/>(MediaRecorder error)"]
+        F5["MongoDB Connection Lost"]
+        F6["Deepgram API Timeout"]
+    end
+
+    subgraph RECOVERY["🔄 Recovery Mechanisms"]
+        R1["Exponential Backoff<br/>Retry Queue<br/>1s → 2s → 4s → 8s"]
+        R2["Socket.IO Auto-Reconnect<br/>+ Session State Sync"]
+        R3["beforeunload Warning<br/>+ Server-side State Persistence<br/>+ Resume from lastQuestion"]
+        R4["Error Handler →<br/>Warning Overlay →<br/>Audio-only Fallback"]
+        R5["Mongoose Connection Retry<br/>Cached Singleton Pattern"]
+        R6["Mock Transcript Fallback<br/>+ Queue for Retry"]
+    end
+
+    subgraph STATE["📋 Session Central Brain"]
+        SB["session_data {<br/>  currentQuestionIndex: 3,<br/>  chunksReceived: 47,<br/>  resumeCount: 1,<br/>  lastHeartbeat: ts,<br/>  status: 'in_progress'<br/>}"]
+    end
+
+    F1 --> R1
+    F2 --> R2
+    F3 --> R3
+    F4 --> R4
+    F5 --> R5
+    F6 --> R6
+
+    R1 --> SB
+    R2 --> SB
+    R3 --> SB
+    R4 --> SB
+    R5 --> SB
+    R6 --> SB
+
+    SB --> RESUME["✅ Resume Interview<br/>from Exact Point of Failure"]
+
+    style FAILURES fill:#450a0a,stroke:#f87171,color:#fecaca
+    style RECOVERY fill:#0c4a6e,stroke:#38bdf8,color:#e0f2fe
+    style STATE fill:#1a2e05,stroke:#84cc16,color:#ecfccb
+```
+
+---
+
+## 9. Deployment Architecture (Production)
+
+```mermaid
+graph TD
+    subgraph CLIENT_TIER["🌐 Client Tier"]
+        BROWSER2["Candidate/Recruiter<br/>Browser"]
+    end
+
+    subgraph RENDER["☁️ Render (PaaS)"]
+        WS["Web Service<br/>Node.js Custom Server<br/>(server.js)"]
+        WS --> NEXTJS_R["Next.js SSR Engine"]
+        WS --> SOCKETIO_R["Socket.IO (WebSocket<br/>over persistent connection)"]
+    end
+
+    subgraph ATLAS["🍃 MongoDB Atlas"]
+        MONGO_R[("MongoDB Cluster<br/>Free Tier / M10+")]
+    end
+
+    subgraph APIS["☁️ Third-Party APIs"]
+        DG_R["Deepgram<br/>nova-2"]
+        GEM_R["Google Gemini<br/>gemini-pro"]
+    end
+
+    subgraph STORAGE_R["📁 Render Disk"]
+        DISK["Persistent Disk<br/>uploads/"]
+    end
+
+    BROWSER2 -- "HTTPS + WSS" --> WS
+    WS --> MONGO_R
+    WS --> DG_R
+    WS --> GEM_R
+    WS --> DISK
+
+    style CLIENT_TIER fill:#1e1b4b,stroke:#818cf8,color:#e0e7ff
+    style RENDER fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    style ATLAS fill:#1a2e05,stroke:#84cc16,color:#ecfccb
+    style APIS fill:#3b0764,stroke:#c084fc,color:#f3e8ff
+    style STORAGE_R fill:#713f12,stroke:#facc15,color:#fef9c3
+```
+
+---
+
+## 10. Scalability Roadmap (Current → Production)
+
+```mermaid
+flowchart LR
+    subgraph CURRENT["📦 Current (Demo)"]
+        C1["Single Node.js Server"]
+        C2["Local Filesystem"]
+        C3["Sync Transcription"]
+        C4["In-Process FFmpeg"]
+        C5["Single MongoDB"]
+        C6["Basic Socket.IO"]
+    end
+
+    subgraph FUTURE["🚀 Production Scale"]
+        F1["Load-Balanced<br/>Server Cluster"]
+        F2["S3 / R2<br/>+ Presigned URLs"]
+        F3["SQS Queue<br/>+ Lambda Workers"]
+        F4["Dedicated FFmpeg<br/>Worker Pool"]
+        F5["MongoDB Atlas<br/>+ Read Replicas"]
+        F6["Redis Pub/Sub<br/>Multi-Server WS"]
+    end
+
+    C1 -- "scale out" --> F1
+    C2 -- "externalize" --> F2
+    C3 -- "async queue" --> F3
+    C4 -- "offload" --> F4
+    C5 -- "replicate" --> F5
+    C6 -- "distribute" --> F6
+
+    style CURRENT fill:#450a0a,stroke:#f87171,color:#fecaca
+    style FUTURE fill:#064e3b,stroke:#34d399,color:#d1fae5
+```
+
